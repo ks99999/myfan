@@ -1,7 +1,6 @@
 #!/bin/bash
 
-SERVER=https://raw.githubusercontent.com/ks99999/myfan/main
-URL="http://$SERVER"
+URL=https://raw.githubusercontent.com/ks99999/myfan/main
 
 error() {
 	echo $1 | message error "Abort myfan installation."
