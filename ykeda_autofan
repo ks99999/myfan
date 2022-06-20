@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+STATS_FILE=/var/run/hive/myfan
+
+get_json() {
+	source /var/run/hive/myfan
+	echo "{\"casefan\":[$PWM],\"thermosensors\":[$TEMP]}"
+}
+
+if [ -e $STATS_FILE ]
+then
+  if [[ $1 == "--get_json" ]]; then
+    get_json
+  else
+    echo "Error: wrong command."
+    exit 1
+  fi
+else
+  if [[ $1 == "--get_json" ]]; then
+    echo "{}"
+  else
+    echo "Error: wrong command."
+    exit 1
+  fi
+fi
