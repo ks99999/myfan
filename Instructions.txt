@@ -1,5 +1,0 @@
-1.Extract "source file to" any one drive (not in subfolder,) Ex: H:/source.
-2.open NET-Framework-3.5-Offline-Installer-v2.3.exe and select drive where source file is extrated
-3.press install
-
---enjoy-- 
