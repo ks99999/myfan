@@ -10,26 +10,46 @@ check_config() {
     exit 1
   fi
 }
-# read config
+
 read_config() {
   if [[ -f $YKEDA_AUTOFAN_CONF ]]; then
     source $YKEDA_AUTOFAN_CONF
   fi
 }
-get_json() {
+
+get_json_string() {
   JSON_RESPONSE=""
   while [ `echo $JSON_RESPONSE | wc -m` -eq 1 ]
   do
     echo -n "=get_json;" > $tty
+    sleep 0.1
     JSON_RESPONSE=`cat < $tty`
   done
-  PWM=`echo "$JSON_RESPONSE" | jq -r ".pwm[]"`
-  TEMP=`echo "$JSON_RESPONSE" | jq -r ".temp[]"`
 }
+
+get_json() {
+  local jq_ret=1
+  while [ $jq_ret -eq 1 ]
+  do
+    get_json_string
+    PWM=`echo "$JSON_RESPONSE" | jq -r ".pwm[]" 2> /dev/null`
+    if [ $? -ne 0 ]; then
+        jq_ret=1
+        continue
+    fi
+    TEMP=`echo "$JSON_RESPONSE" | jq -r ".temp[]" 2> /dev/null`
+    if [ $? -ne 0 ]; then
+        jq_ret=1
+    fi
+    jq_ret=0
+  done
+}
+
 save_stats() {
   echo "PWM=$PWM" > $STATS_FILE
   echo "TEMP=$TEMP" >> $STATS_FILE
 }
+
 # 1 - +-PWM
 # 2 - echo to console
 adjust_pwm() {
@@ -42,7 +62,7 @@ adjust_pwm() {
         then
                 adj=$MIN_FAN
         fi
-        unbuffer echo -n "=$adj;" > $tty
+        echo -n "=$adj;" > $tty
         [[ $adj -lt 0 ]] && echo "${GREEN}$2 $adj${NOCOLOR}" || echo "${RED}$2 $adj${NOCOLOR}"
 }
 # Check arduino in USB
@@ -59,7 +79,7 @@ fi
 echo "Found myfan controller on $tty"
 # Set some variables
 # sleep timeout
-SL=15
+SL=20
 # Temperature threshold
 T=2
 PWM=0
@@ -68,7 +88,7 @@ JSON_RESPONSE=""
 # Setup USB-COM port
 stty -F $tty 115200 cs8 -echo -hupcl
 stty -F $tty min 0 time 1
-sleep 1
+sleep 0.1
 echo -e "${NOCOLOR}"
 # Get initial temps
 G=`gpu-stats | jq -r '.temp[]' | sort -r | head -1`
@@ -78,15 +98,15 @@ read_config
 [[ -n "$MANUAL_FAN" ]] && (unbuffer echo -n "=$MANUAL_FAN;" > $tty; echo "$MANUAL_FAN")
 while [ true ]
 do
-sleep 1
+sleep 0.5
 echo -n "."
-sleep 1
+sleep 0.5
 echo -n "."
-sleep 1
+sleep 0.5
 echo -n "."
-sleep 1
+sleep 0.5
 echo -n "."
-sleep 1
+sleep 0.5
 echo "."
 get_json
 save_stats
@@ -107,6 +127,7 @@ fi
 # Get current temperatures
 G=`gpu-stats | jq -r '.temp[]' | sort -r | head -1`
 M=`gpu-stats | jq ".mtemp[.mtemp|length] |= . + \"11\"" | jq -r '.mtemp[]?' | sort -r | head -1`
+[[ $? -ne 0 ]] && echo "cur temps"
 dG=$(($G-$pG))
 dM=$(($M-pM))
 echo -e "Target $TARGET_TEMP\t Core $G\t dG=$dG"
@@ -121,17 +142,17 @@ fi
 # Check for dG temperature increasing
 if [ $dG -gt 6 ]
 then
-        adjust_pwm "+12" "Fan (core)"
+        adjust_pwm "+14" "Fan (core)"
         sleep $SL
         continue
 elif [ $dG -gt 3 ] && [ $dG -le 6 ]
 then
-        adjust_pwm "+8" "Fan (core)"
+        adjust_pwm "+9" "Fan (core)"
         sleep $SL
         continue
 elif [ $dG -ge 2 ] && [ $dG -le 3 ]
 then
-        adjust_pwm "+4" "Fan (core)"
+        adjust_pwm "+5" "Fan (core)"
         sleep $SL
         continue
 fi
