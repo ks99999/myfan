@@ -127,7 +127,6 @@ fi
 # Get current temperatures
 G=`gpu-stats | jq -r '.temp[]' | sort -r | head -1`
 M=`gpu-stats | jq ".mtemp[.mtemp|length] |= . + \"11\"" | jq -r '.mtemp[]?' | sort -r | head -1`
-[[ $? -ne 0 ]] && echo "cur temps"
 dG=$(($G-$pG))
 dM=$(($M-pM))
 echo -e "Target $TARGET_TEMP\t Core $G\t dG=$dG"
