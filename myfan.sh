@@ -140,8 +140,7 @@ echo -e "Target $TARGET_TEMP\t Core $G\t dG=$dG"
 echo -e "Target $TARGET_MEM_TEMP\t Memory $M\t dM=$dM"
 if [ -n "$MANUAL_FAN" ]
 then
-#        echo "MANUAL_FAN=$MANUAL_FAN"
-        unbuffer echo -n "=$MANUAL_FAN;" > $tty
+        echo -n "=$MANUAL_FAN;" > $tty
         sleep $SL
         continue
 fi
@@ -175,8 +174,8 @@ elif [ $(($TARGET_TEMP-$G)) -gt $T ] && [ $(($TARGET_MEM_TEMP-$M)) -gt $T ]
 then
         if [ $dG -le -3 ]
         then
-                adjust_pwm "-10" "Fan fast drop dG & dM"
-        else    adjust_pwm "-2" "Fan dG & dM"
+                adjust_pwm "-10" "Fan fast drop (core & mem)"
+        else    adjust_pwm "-2" "Fan (core & mem)"
         fi
 fi
 sleep $SL
