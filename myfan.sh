@@ -173,7 +173,11 @@ then
 # Check for DECREASE RPM possibility
 elif [ $(($TARGET_TEMP-$G)) -gt $T ] && [ $(($TARGET_MEM_TEMP-$M)) -gt $T ]
 then
-        adjust_pwm "-2" "Fan (core & memory)"
+        if [ $dG -le -3 ]
+        then
+                adjust_pwm "-10" "Fan fast drop dG & dM"
+        else    adjust_pwm "-2" "Fan dG & dM"
+        fi
 fi
 sleep $SL
 done
