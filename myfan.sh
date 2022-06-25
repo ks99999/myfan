@@ -23,7 +23,12 @@ get_json_string() {
   do
     echo -n "=get_json;" > $tty
     sleep 0.1
-    JSON_RESPONSE=`cat < $tty`
+    if [ $read_cat -eq 1 ]
+    then
+      read JSON_RESPONSE < $tty
+    else
+        JSON_RESPONSE=`cat < $tty`
+    fi
   done
 }
 
@@ -66,20 +71,22 @@ adjust_pwm() {
         [[ $adj -lt 0 ]] && echo "${GREEN}$2 $adj${NOCOLOR}" || echo "${RED}$2 $adj${NOCOLOR}"
 }
 # Check arduino in USB
+read_cat=0
 if [ -e /dev/ttyACM0 ]
 then
         tty=/dev/ttyACM0
+        read_cat=1
 elif [ -e /dev/ttyUSB0 ]
 then
         tty=/dev/ttyUSB0
 else
-        echo "Not found arduino controller"
+        echo "Not found myfan controller"
         exit 1
 fi
 echo "Found myfan controller on $tty"
 # Set some variables
 # sleep timeout
-SL=20
+SL=17.5
 # Temperature threshold
 T=2
 PWM=0
@@ -87,7 +94,7 @@ TEMP=0
 JSON_RESPONSE=""
 # Setup USB-COM port
 stty -F $tty 115200 cs8 -echo -hupcl
-stty -F $tty min 0 time 1
+#stty -F $tty min 0 time 1
 sleep 0.1
 echo -e "${NOCOLOR}"
 # Get initial temps
