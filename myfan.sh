@@ -88,13 +88,13 @@ echo "Found myfan controller on $tty"
 # sleep timeout
 SL=17.5
 # Temperature threshold
-T=2
+T=1
 PWM=0
 TEMP=0
 JSON_RESPONSE=""
 # Setup USB-COM port
 stty -F $tty 115200 cs8 -echo -hupcl
-#stty -F $tty min 0 time 1
+stty -F $tty min 0 time 1
 sleep 0.1
 echo -e "${NOCOLOR}"
 # Get initial temps
