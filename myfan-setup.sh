@@ -7,13 +7,13 @@ error() {
         exit 1
 }
 
-wget -O hello "$URL/hello"
+wget --no-cache -O hello "$URL/hello"
 [[ $? -ne 0 ]] && error "Could not download hello"
-wget -O myfan.sh "$URL/myfan.sh"
+wget --no-cache -O myfan.sh "$URL/myfan.sh"
 [[ $? -ne 0 ]] && error "Could not download myfan.sh"
-wget -O myfan "$URL/myfan"
+wget --no-cache -O myfan "$URL/myfan"
 [[ $? -ne 0 ]] && error "Could not download myfan"
-wget -O ykeda_autofan "$URL/ykeda_autofan"
+wget --no-cache -O ykeda_autofan "$URL/ykeda_autofan"
 [[ $? -ne 0 ]] && error "Could not download ykeda_autofan"
 
 chmod 755 hello
