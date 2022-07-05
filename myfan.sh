@@ -98,8 +98,8 @@ stty -F $tty min 0 time 1
 sleep 0.1
 echo -e "${NOCOLOR}"
 # Get initial temps
-G=`gpu-stats | jq -r '.temp[]' | sort -r | head -1`
-M=`gpu-stats | jq ".mtemp[.mtemp|length] |= . + \"11\"" | jq -r '.mtemp[]?' | sort -r | head -1`
+G=`gpu-stats 2>/dev/null | jq -r '.temp[]' | sort -r | head -1`
+M=`gpu-stats 2>/dev/null | jq ".mtemp[.mtemp|length] |= . + \"11\"" | jq -r '.mtemp[]?' | sort -r | head -1`
 check_config
 read_config
 [[ -n "$MANUAL_FAN" ]] && (unbuffer echo -n "=$MANUAL_FAN;" > $tty; echo "$MANUAL_FAN")
@@ -132,8 +132,8 @@ then
         continue
 fi
 # Get current temperatures
-G=`gpu-stats | jq -r '.temp[]' | sort -r | head -1`
-M=`gpu-stats | jq ".mtemp[.mtemp|length] |= . + \"11\"" | jq -r '.mtemp[]?' | sort -r | head -1`
+G=`gpu-stats 2>/dev/null | jq -r '.temp[]' | sort -r | head -1`
+M=`gpu-stats 2>/dev/null | jq ".mtemp[.mtemp|length] |= . + \"11\"" | jq -r '.mtemp[]?' | sort -r | head -1`
 dG=$(($G-$pG))
 dM=$(($M-pM))
 echo -e "Target $TARGET_TEMP\t Core $G\t dG=$dG"
