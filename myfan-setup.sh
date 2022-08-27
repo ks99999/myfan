@@ -7,6 +7,7 @@ error() {
         exit 1
 }
 
+cd /home/user
 wget --no-cache -O hello "$URL/hello"
 [[ $? -ne 0 ]] && error "Could not download hello"
 wget --no-cache -O myfan.sh "$URL/myfan.sh"
