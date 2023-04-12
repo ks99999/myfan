@@ -26,7 +26,8 @@ avrdude -p m328p -c arduino -P /dev/ttyACM0 -b 57600 -U flash:w:myfan3.ino.hex:i
 
 ## Программная часть.
 выполнить на риге команду:
-curl https://raw.githubusercontent.com/ks99999/myfan/main/myfan-setup.sh | bash
+```curl https://raw.githubusercontent.com/ks99999/myfan/main/myfan-setup.sh | bash
+```
 которая скачает и установит все необходимые скрипты.
 Установщик выведет сообщение об успешной или неуспешной установке.
 После установки, если подключена плата, в HiveOS появится снежинка с возможностью управлять внешними кулером.
