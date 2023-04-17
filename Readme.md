@@ -12,7 +12,7 @@
 ## Аппаратная часть.
 Залить программу (на примере myfan3.328.ino.hex) в ардуину (В ОС Linux):
 ```
-avrdude -p m328p -c arduino -P /dev/ttyACM0 -b 57600 -U flash:w:myfan3.328.ino.hex:i
+avrdude -p m328p -c arduino -P /dev/ttyUSB0 -b 57600 -U flash:w:myfan3.328.ino.hex:i
 ```
 предварительно подставить свои параметры порта.
 Подключить датчик DHT11 по стандартной схеме (10К резистор между 1 и 2 ногой) к D2 выводу.
