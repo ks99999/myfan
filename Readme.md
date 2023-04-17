@@ -10,7 +10,7 @@
 Программная часть - набор скриптов для взаимодействия с HiveOS.
 
 ## Аппаратная часть.
-Залить программу myfan3.ino.hex в ардуину (В ОС Linux):
+Залить программу (на примере myfan3.ino.hex) в ардуину (В ОС Linux):
 ```
 avrdude -p m328p -c arduino -P /dev/ttyACM0 -b 57600 -U flash:w:myfan3.ino.hex:i
 ```
