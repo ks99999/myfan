@@ -97,8 +97,15 @@ stty -F $tty 115200 cs8 -echo -hupcl
 stty -F $tty min 0 time 1
 sleep 0.1
 echo -e "${NOCOLOR}"
+# Exclude cpu or intel gpus
+CPUGPU=`gpu-stats 2>/dev/null > /dev/null | jq -r ".brand" | grep -E "(intel|cpu)" && echo 1 || echo 0`
 # Get initial temps
-G=`gpu-stats 2>/dev/null | jq -r '.temp[]' | sort -r | head -1`
+if [ "$CPUGPU" -eq "1" ]
+then
+        G=`gpu-stats 2>/dev/null | jq -r '.temp[]' | sort -r | head -1`
+else
+        G=`gpu-stats 2>/dev/null | jq -r '.temp[]' | tail -n +2 | sort -r | head -1`
+fi
 M=`gpu-stats 2>/dev/null | jq ".mtemp[.mtemp|length] |= . + \"11\"" | jq -r '.mtemp[]?' | sort -r | head -1`
 check_config
 read_config
@@ -132,7 +139,12 @@ then
         continue
 fi
 # Get current temperatures
-G=`gpu-stats 2>/dev/null | jq -r '.temp[]' | sort -r | head -1`
+if [ "$CPUGPU" -eq "1" ]
+then
+        G=`gpu-stats 2>/dev/null | jq -r '.temp[]' | sort -r | head -1`
+else
+        G=`gpu-stats 2>/dev/null | jq -r '.temp[]' | tail -n +2 | sort -r | head -1`
+fi
 M=`gpu-stats 2>/dev/null | jq ".mtemp[.mtemp|length] |= . + \"11\"" | jq -r '.mtemp[]?' | sort -r | head -1`
 dG=$(($G-$pG))
 dM=$(($M-pM))
