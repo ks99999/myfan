@@ -1,0 +1,679 @@
+#!/usr/bin/env bash
+
+# Sends hello to Hive, receives config files, restarts miner
+
+
+
+CONF_SEQ="/run/hive/confseq"
+HELLO_OK="/tmp/.hive-hello-ok"
+VPN_INSTALLED="/tmp/.openvpn-installed"
+
+# retry interval. set to 0 or comment to disable
+RETRY_TIME=60
+
+arg_retry=0
+arg_check=0
+arg_test=0
+
+# redetect gpu
+arg_redetect=0
+# send boot flag with hello message
+arg_boot=0
+# verbose output
+arg_verbose=0
+# no color
+arg_nocolor=0
+# no miner start
+arg_nostart=0
+
+
+# check for arguments
+for var in "$@"; do
+        case "$var" in
+                boot) arg_boot=1;;
+                redetect) arg_redetect=1;;
+                verbose) arg_verbose=1;;
+                nocolor) arg_nocolor=1;;
+                nostart) arg_nostart=1;;
+                # used internally
+                retry) arg_retry=1;;
+                check) arg_check=1;;
+                test) arg_test=1;;
+        esac
+done
+
+[[ $arg_nocolor == 0 ]] && source colors
+
+if [[ -z $RIG_CONF || -z "$API_HOST_FILE" ]]; then #reread env variables as after upgrade this can be empty
+        source /etc/environment
+        export `grep -vE '^$|^#' /etc/environment | cut -d= -f1` #export all variables from file
+fi
+
+[[ -f $HELLO_OK ]] && rm $HELLO_OK
+
+mkdir -p "/hive-config"
+mkdir -p "/hive-config/openvpn"
+
+[[ ! -f $RIG_CONF ]] && echo -e "No config $RIG_CONF" && exit 1
+
+source $RIG_CONF
+[[ $DISABLE_CERT_CHECK -ne 0 ]] && insecure="--insecure" || insecure=
+
+[[ -f "$API_HOST_FILE" ]] && source $API_HOST_FILE # fallback api host
+
+[[ ! -z $PROJECT_HASH ]] && FARM_HASH=$PROJECT_HASH #compat
+
+[[ -z $FARM_HASH && -z $RIG_ID ]] && echo "Please use FARM_HASH or RIG_ID in config" && exit 1
+[[ ! -z $RIG_ID  && -z $RIG_PASSWD ]] && echo "No RIG_PASSWD in config" && exit 1
+[[ -z $HIVE_HOST_URL ]] && echo "No HIVE_HOST_URL in config" && exit 1
+
+
+HIVE_URL="$HIVE_HOST_URL/worker/api"
+
+# retry again until success
+if [[ $arg_retry == 1 ]]; then
+        echo -e "${YELLOW}Will try again in ${RETRY_TIME}s${NOCOLOR}"
+        sleep $RETRY_TIME # increase delay on start
+        while true; do
+                sleep $RETRY_TIME
+                date
+                [[ -f $HELLO_OK ]] && exit 0
+                # do we need to use boot flag here?
+                $0 check && exit 0
+        done
+fi
+
+function hello_quit {
+        screens=`screen -ls hello | grep -Po "\K[0-9]+(?=\.hello)"`
+        for pid in $screens; do
+                screen -S $pid.hello -X quit > /dev/null
+        done
+}
+
+# Make hello request ================================================================
+
+#boot_time=`TZ='UTC' uptime -s`
+boot_time=$(( `date +%s` - `awk '{printf "%d", $1}' /proc/uptime` ))
+
+if [[ ! -e $GPU_DETECT_JSON || $arg_redetect == 1 ]]; then #this is needed only when upgrading version. later we can remove this
+        echo "${CYAN}> Detecting GPU${NOCOLOR}"
+        amdmeminfo -q -s -n > $AMDMEMINFO_FILE 2>&1
+        gpu-detect listjson > $GPU_DETECT_JSON
+fi
+gpus_json=`jq . $GPU_DETECT_JSON 2>/dev/null` || gpus_json="[]"
+gpu_count_amd=`gpu-detect AMD`
+gpu_count_nvidia=`gpu-detect NVIDIA`
+gpu_count_intel=`gpu-detect INTEL`
+ips=( $(hostname -I) )
+ips_json=`printf '%s\n' "${ips[@]}" | jq -R . | jq -s -c .`
+net_interfaces=`ip -o link | grep -vE 'LOOPBACK|POINTOPOINT|sit0|can0|docker|sonm|ifb|veth' | sed 's/altname.*//' | awk '{  printf "{\"iface\": \"%s\", \"mac\": \"%s\"}\n", substr($2, 1, length($2)-1), $(NF-2)  }' | jq -sc .`
+[[ -f $VPN_INSTALLED ]] && openvpn=1 || openvpn=0
+#taken from netconf
+lan_addresses=(`ip -o -f inet addr show | grep eth0 | awk '/scope global/ {print $4}'`)
+lan_gateway=`ip route | awk '/default/ && /eth0/ { print $3 }' | head -1`
+lan_dns=`grep -m1 ^nameserver /run/systemd/resolve/resolv.conf | awk '{print $2}'`
+grep -q '^DHCP=yes' /etc/systemd/network/20-ethernet.network && lan_dhcp=1 || lan_dhcp=0
+lan_config="{\"dhcp\": $lan_dhcp, \"address\": \"${lan_addresses[@]}\", \"gateway\": \"$lan_gateway\", \"dns\": \"$lan_dns\"}"
+
+#mb_manufacturer=`dmidecode | grep -A4 '^Base Board Information' | grep "Manufacturer:" | sed -E 's/\sManufacturer:\s+(.*)/\1/'`
+#mb_product=`dmidecode | grep -A4 '^Base Board Information' | grep "Product Name:" | sed -E 's/\sProduct Name:\s+(.*)/\1/'`
+#system_uuid=$(dmidecode -s system-uuid) #same as /sys/class/dmi/id/product_uuid
+
+system_uuid=`cat /sys/class/dmi/id/product_uuid 2>/dev/null` || system_uuid=$(dmidecode -s system-uuid)
+mb_product=`cat /sys/class/dmi/id/board_name 2>/dev/null`
+mb_manufacturer=`cat /sys/class/dmi/id/board_vendor 2>/dev/null`
+
+mb_bios=`cat /sys/class/dmi/id/bios_version 2>/dev/null`
+mb_bios_date=`cat /sys/class/dmi/id/bios_date 2>/dev/null` && mb_bios="$mb_bios $mb_bios_date"
+
+cpu_model=`lscpu | grep "Model name:" | sed 's/Model name:[ \t]*//g'`
+cpu_cores=`lscpu | grep "^CPU(s):" | sed 's/CPU(s):[ \t]*//g'`
+aes=`lscpu | grep "^Flags:.*aes" | wc -l`
+cpu_id=`dmidecode -t 4 | grep ID | sed 's/.*ID://;s/ //g'`
+[[ -e /sys/class/net/eth0/address ]] &&
+        first_mac=`sed 's/://g' /sys/class/net/eth0/address` || #on some motherboards eth0 is disabled
+        first_mac=$(echo $net_interfaces | jq -r .[0].mac | sed 's/://g') #just grab the first in list
+
+if [[ ! -f /hive-config/.DISKLESS_AMD ]]; then
+        bootpart=`readlink -f /dev/block/$(mountpoint -d /)`
+        if [[ "$(echo $bootpart | grep -c nvme)" -gt 0 ]]; then
+            bootdisk=${bootpart::-2} #cutoff partnumber
+        else
+            bootdisk=${bootpart::-1} #cutoff partnumber
+        fi
+        #disk_model=`parted -mls | grep -m1 "$bootdisk:" | awk -F ':' '{print $7 " " $2}'`
+        disk_info=`parted -mls 2>/dev/null | grep "/dev/"`
+        # root disk first
+        disk_model=`echo "$disk_info" | grep -m1 "$bootdisk:" | awk -F ':' '{print $7 " " $2}'`
+        disk_model+=`echo "$disk_info" | grep -v "$bootdisk:" | awk -F ':' '{print ", " $7 " " $2}'`
+else
+        fsip=`cat /proc/cmdline | grep -o '\bhttproot=[^ ]*' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'`
+        disk_model="Diskless PXE from $fsip"
+fi
+
+# Ubuntu distro version: 18.04 will be 1804, 20.04 wil be 2004 and so on
+distro_ver=$(lsb_release -rs)
+ubuntu_ver=$(echo $distro_ver | tr -d '.')
+
+kernel=$(uname --kernel-release )
+[[ $(echo $kernel | cut -f3 -d. | cut -f1 -d- ) == "0" ]] && kernel+=" $(uname --kernel-version | cut -f1 -d. )"
+[[ -e /opt/amdgpu/VERSION ]] && amd_ocl_version=$(cat /opt/amdgpu/VERSION 2>/dev/null )
+amd_kernel=$(modinfo amdgpu |grep ^version: | sed -e 's/version://' -e 's/^[[:space:]]*//' )
+amd_version=$(dpkg -s amdgpu-pro 2>&1 | grep '^Version: ' | sed 's/Version: //' | awk -F'-' '{print $1}' )
+[[ -z $amd_version ]] && amd_version=$(dpkg -s amdgpu 2>&1 | grep '^Version: ' | sed 's/Version: //' | awk -F'-' '{print $1}' )
+#if there is no driver but only OpenCL
+[[ -z $amd_ocl_version ]] && amd_ocl_version=$(dpkg -s opencl-amdgpu-pro-icd 2>&1 | grep '^Version: ' | sed 's/Version: //' | awk -F'-' '{print $1}' )
+[[ -z $amd_kernel ]] && amd_kernel="kernel"
+[[ -z $amd_version ]] && amd_version="$amd_ocl_version ($amd_kernel)"
+
+intel_ocl_version=$(dpkg-query --showformat='${Version}' --show intel-opencl-icd  2>/dev/null )
+# System pseudo unique number
+uid=$(echo ${system_uuid}-${cpu_id}-${first_mac} | tr '[:upper:]' '[:lower:]' | sha1sum | awk '{print $1}')
+
+
+version=$(dpkg -s hive | grep '^Version: ' | sed 's/Version: //' )
+#inrelease_filename=/var/lib/apt/lists/`cat /etc/apt/sources.list.d/hiverepo.list | grep -m1 '^deb http' | awk '{print $2}' | sed 's/http:\/\///g' | sed 's/\//_/g'`InRelease
+#packages_hash=
+#[[ -e $inrelease_filename ]] &&
+#       packages_hash=$(cat $inrelease_filename | grep -m1 -A3 '^SHA1:' | grep 'Packages$' | awk '{print $1}')
+[[ -e /hive-config/RepoVer ]] &&
+        repover=$(< /hive-config/RepoVer) ||
+        repover=0
+version="$version@$repover"
+
+# read and trim ref_id
+ref_id=
+[[ -e $REF_ID ]] && ref_id=$(< $REF_ID)
+[[ "$ref_id" =~ ^[[:space:]]*([^[:space:]].*[^[:space:]])[[:space:]]*$ ]] && ref_id=${BASH_REMATCH[1]}
+
+request=$(
+        jq -n \
+        --arg uid "$uid" \
+        --arg rig_id "$RIG_ID" \
+        --arg passwd "$RIG_PASSWD" \
+        --arg boot_time "$boot_time" \
+        --arg boot_event "$arg_boot" \
+        --argjson ip "$ips_json" \
+        --argjson net_interfaces "$net_interfaces" \
+        --argjson lan_config "$lan_config" \
+        --arg openvpn "$openvpn" \
+        --argjson gpu "$gpus_json" \
+        --arg gpu_count_amd "$gpu_count_amd" \
+        --arg gpu_count_nvidia "$gpu_count_nvidia" \
+        --arg gpu_count_intel "$gpu_count_intel" \
+        --arg nvidia_version "`nvidia-smi --help | head -n 1 | awk '{print $NF}' | sed 's/v//'`" \
+        --arg amd_version "$amd_version" \
+        --arg intel_version "$intel_ocl_version" \
+        --arg manufacturer "$mb_manufacturer" --arg product "$mb_product" --arg bios "$mb_bios" --arg system_uuid "$system_uuid" \
+        --arg model "$cpu_model" --arg cores "$cpu_cores" --arg aes "$aes" --arg cpu_id "$cpu_id" \
+        --arg disk_model "$disk_model" \
+        --arg image_version "$distro_ver" \
+        --arg kernel "$kernel" \
+        --arg server_url "$HIVE_HOST_URL" \
+        --arg version "$version" \
+        --arg ref_id "$ref_id" \
+        '{
+                "method": "hello", "jsonrpc": "2.0", "id": 0,
+                "params": {
+                        $rig_id, $passwd, $server_url, $uid, $ref_id,
+                        $boot_time, $boot_event, $ip, $net_interfaces, $openvpn, $lan_config,
+                        $gpu, $gpu_count_amd, $gpu_count_nvidia, $gpu_count_intel,
+                        "mb": {$manufacturer, $product, $system_uuid, $bios}, "cpu": {$model, $cores, $aes, $cpu_id}, $disk_model,
+                        $image_version, $kernel, $amd_version, $nvidia_version, $intel_version,
+                        $version
+                }
+        }'
+)
+
+# ROH case fan
+if [[ `lsusb 2>/dev/null | grep -c 16c0:05dc` -ge 1 ]]; then
+        octofan=`$OCTOFAN get_max_rpm_json`
+        if [[ -n $octofan && $octofan != '[]' ]]; then
+                octofan_json=$(
+                        jq -n \
+                        --argjson octofan "$octofan" \
+                        '{
+                                "params": {
+                                        $octofan
+                                }
+                        }'
+                )
+                [[ -n $octofan_json ]] &&
+                        request=`echo "$request" "$octofan_json" | jq -s '.[0] * .[1]'`
+        fi
+fi
+
+# Coolbox Autofan
+#if [[ `lsusb 2>/dev/null | grep -c 1a86:7523` -eq 1 ]]; then
+if [[ `lsusb -v -d 10c4:ea60 2>/dev/null | grep iSerial | awk '{print $3}'` == 'COOLBOX_AUTOFAN' ]]; then
+        coolbox_serial=`$COOLBOX --get_serial`
+        if [[ -n $coolbox_serial ]]; then
+                coolbox_json=$(
+                        jq -n \
+                        --arg serial "$coolbox_serial" \
+                        '{
+                                "params": {
+                                        "coolbox": {$serial}
+                                }
+                        }'
+                )
+
+                [[ -n $coolbox_json ]] &&
+                        request=`echo "$request" "$coolbox_json" | jq -s '.[0] * .[1]'`
+
+                touch $COOLBOX_AVAILABLE_FILE
+        else
+                rm -f $COOLBOX_AVAILABLE_FILE
+        fi
+fi
+
+# ykeda Autofan
+ykeda_modelname=
+[[ `lsusb 2> /dev/null | grep -E "(LGT8F328P|CH340|CP210x)" | wc -l` -eq "1" ]] && ykeda_modelname=myfan
+
+if [[ `lsusb -v -d 10c4:ea60 2>/dev/null | grep iSerial | awk '{print $3}'` == 'ykeda_autofan' ]]; then
+        ykeda_modelname=`lsusb -v -d 10c4:ea60 2>/dev/null | grep iProduct | awk '{print $3}'`
+elif [[ `lsusb -v -d 10c4:ea70 2>/dev/null | grep iSerial | awk '{print $3}'` == 'ykeda_autofan' ]]; then
+        ykeda_modelname=`lsusb -v -d 10c4:ea70 2>/dev/null | grep iProduct | awk '{print $3}'`
+fi
+
+if [[ -n $ykeda_modelname ]]; then
+        ykeda_autofan_json=$(
+                jq -n \
+                        --arg model "$ykeda_modelname" \
+                        '{
+                                "params": {
+                                        "ykeda_autofan": {$model}
+                                }
+                        }'
+                )
+
+        [[ -n $ykeda_autofan_json ]] &&
+                request=`echo "$request" "$ykeda_autofan_json" | jq -s '.[0] * .[1]'`
+
+        touch $YKEDA_AVAILABLE_FILE
+else
+        rm -f $YKEDA_AVAILABLE_FILE
+fi
+
+# Wind Tank Autofan
+if $WINDTANK_AUTOFAN --check_hw; then
+        windtank_modelname=
+        windtank_modelname=`$WINDTANK_AUTOFAN --model`
+
+        windtank_autofan_json=$(
+                jq -n \
+                        --arg model "$windtank_modelname" \
+                        '{
+                                "params": {
+                                        "windtank_autofan": {$model}
+                                }
+                        }'
+                )
+
+        [[ -n $windtank_autofan_json ]] &&
+                request=`echo "$request" "$windtank_autofan_json" | jq -s '.[0] * .[1]'`
+fi
+
+# 8MK_NET Autofan
+if $MKNET_AUTOFAN --check_hw; then
+        mknet_modelname=
+        mknet_modelname=`$MKNET_AUTOFAN --model`
+
+        mknet_autofan_json=$(
+                jq -n \
+                        --arg model "$mknet_modelname" \
+                        '{
+                                "params": {
+                                        "mknet_autofan": {$model}
+                                }
+                        }'
+                )
+
+        [[ -n $mknet_autofan_json ]] &&
+                request=`echo "$request" "$mknet_autofan_json" | jq -s '.[0] * .[1]'`
+fi
+
+# current remote connection state
+remote_conn_state=
+remote-connections shellinabox_status >/dev/null && remote_conn_state+='"shellinabox_enable": true,' || remote_conn_state+='"shellinabox_enable": false,'
+remote-connections ssh_status >/dev/null && remote_conn_state+='"ssh_enable": true,' || remote_conn_state+='"ssh_enable": false,'
+remote-connections ssh_password_status >/dev/null && remote_conn_state+='"ssh_password_enable": true' || remote_conn_state+='"ssh_password_enable": false'
+# vnc status exclude from  reporting 
+#remote-connections x11vnc_status >/dev/null && remote_conn_state+='"vnc_enable": true' || remote_conn_state+='"vnc_enable": false'
+request=`echo "$request" "{\"params\":{$remote_conn_state}}" | jq -s '.[0] * .[1]'`
+
+[[ ! -z $FARM_HASH ]] &&
+        request=`echo "$request" | jq --arg farm_hash "$FARM_HASH" '. * {"params": {$farm_hash}}'`
+
+if [[ ! -z $FARM_HASH && ! -z $WORKER_NAME ]]; then
+        request=`echo "$request" | jq --arg worker_name "$WORKER_NAME" '. * {"params": {$worker_name}}'`
+elif [[ ! -z $SET_WORKER_NAME ]]; then
+        request=`echo "$request" | jq --arg worker_name "$SET_WORKER_NAME" '. * {"params": {$worker_name}}'`
+fi
+
+(( ! $arg_test )) && echo "${CYAN}> Sending Hello${NOCOLOR}"
+# print only in verbose mode
+[[ $arg_verbose == 1 ]] && echo `echo "$request" | jq ${NOCOLOR:+-C} --arg pass "${RIG_PASSWD//?/*}" '.params.passwd=$pass'`
+(( $arg_test )) && exit
+
+
+if [[ $MSGPACK_ENABLE -ne 0 ]]; then
+        tmpfile=$(mktemp)
+        if [[ $? -ne 0 ]]; then
+                MSGPACK_ENABLE=0 # fallback to old method
+        else
+                response=`echo "$request" | json2msgpack -B 25 | curl $insecure -L --data-binary @- -o $tmpfile \
+                                --connect-timeout 7 --max-time 15 --silent -w "%{content_type}\n%{http_code}\n" \
+                                -XPOST "${HIVE_URL}?id_rig=$RIG_ID&method=hello" -H "Content-Type: application/x-msgpack"`
+                exitcode=$?
+                [[ "$response" =~ /x-msgpack ]] && response=$(msgpack2json -B -i $tmpfile 2>/dev/null) || MSGPACK_ENABLE=0
+                rm -f $tmpfile
+        fi
+fi
+if [[ $MSGPACK_ENABLE -eq 0 ]]; then
+        response=`echo "$request" | curl $insecure -L --data @- --connect-timeout 7 --max-time 15 --silent \
+                        -XPOST "${HIVE_URL}?id_rig=$RIG_ID&method=hello" -H "Content-Type: application/json"`
+        exitcode=$?
+fi
+if [[ $exitcode -ne 0 ]]; then
+        echo "${RED}ERROR: connection to API server failed ($HIVE_HOST_URL)${NOCOLOR}"
+        human-curl-error $exitcode
+        [[ ! -z $RETRY_TIME && $RETRY_TIME != 0 && $arg_check == 0 ]] &&
+                echo -e "${YELLOW}Will try again in ${RETRY_TIME}s${NOCOLOR}" &&
+                [[ $(screen -ls | grep -c hello) == 0 ]] &&
+                        screen -dmS hello $0 retry
+        exit $exitcode
+fi
+
+# output and check json
+parsed=`echo "$response" | jq ${NOCOLOR:+-C} '.' 2>/dev/null`
+exitcode=$?
+if [[ $exitcode -ne 0 ]]; then
+        [[ $arg_verbose == 1 ]] && echo "$response"
+        error=`echo "$response" | grep -oP "<title>\K[^<]+"`
+        if [[ ! -z "$error" ]]; then
+                echo "${RED}ERROR:${NOCOLOR} $error"
+        else
+                echo "${RED}ERROR: parsing JSON failed${NOCOLOR}"
+        fi
+        exit $exitcode # error json parsing
+fi
+
+# print only in verbose mode
+[[ $arg_verbose == 1 ]] && echo "$parsed"
+
+error=`echo "$response" | jq '.error' --raw-output`
+if [[ ! -z "$error" && "$error" != "null" ]]; then
+        echo -e "${RED}ERROR:${NOCOLOR} $(echo "$response" | jq '.error.message' -r)"
+        #hello_quit
+        exit 1
+fi
+
+# Check config
+config=`echo "$response" | jq '.result.config' --raw-output`
+if [[ -z "$config" || "$config" == "null" ]]; then
+        #echo "Response body: $response"
+        echo -e "${RED}ERROR:${NOCOLOR} no config field in response"
+        #hello_quit
+        exit 1
+fi
+
+echo "${BGREEN}OK${NOCOLOR}"
+
+# stop screen session if not running from it
+[[ $arg_check == 0 ]] && hello_quit
+
+# write config sequence
+confseq=`echo "$response" | jq '.result.confseq' --raw-output`
+[[ ! -z "$confseq" && "$confseq" != "null" ]] && echo "$confseq" > $CONF_SEQ
+
+# write config and reload it
+[[ -e $RIG_CONF ]] && old_config=$(< $RIG_CONF) || old_config=
+if [[ "$old_config" != "$config" ]]; then
+        echo "${CYAN}> Writing Rig config${NOCOLOR}"
+        echo "$config" > $RIG_CONF
+        source $RIG_CONF
+fi
+
+# update worker name
+hostname-check
+
+# Password
+# SET_RIG_PASS var is from previous rig.conf
+if [[ $SET_RIG_PASS -eq 1 ]]; then
+        hive-passwd setuser "$RIG_PASSWD"
+elif [[ ! -z "$RIG_PASSWD" && "$RIG_PASSWD" != "1" ]]; then
+        if hive-passwd check 1; then
+                msg="SSH/VNC/Shellinabox now use password from rig.conf\nIt can be changed with command:\nhive-passwd [new password]"
+                myip="$(ip-external | head -1)"
+                if [[ $? -eq 0 && " ${ips[@]} " =~ " $myip " ]]; then
+                        echo "${CYAN}> Setting Rig password${NOCOLOR}"
+                        hive-passwd setuser "$RIG_PASSWD" && echo -e "$msg" | message warn "Worker password was changed" payload >/dev/null
+                fi
+        fi
+fi
+
+# apply config to SSH/VNC/Shellinabox services
+remote-connections apply_conf
+
+# Timezone
+[[ ! -z $TIMEZONE ]] &&
+        timedatectl set-timezone "$TIMEZONE"
+
+# Locale
+[[ ! -z $SYSTEM_LANG ]] &&
+        locale-setup "$SYSTEM_LANG"
+
+# Wallet config
+[[ -e $WALLET_CONF ]] && old_wallet=$(< $WALLET_CONF) || old_wallet=
+wallet=`echo "$response" | jq '.result.wallet' --raw-output`
+if [[ ! -z "$wallet" && "$wallet" != "null" ]]; then
+        [[ "$old_wallet" != "$wallet" ]] &&
+                echo "${CYAN}> Writing Wallet config${NOCOLOR}" &&
+                echo "$wallet" > $WALLET_CONF
+fi
+
+# Nvidia config
+nvidia-driver-update -c
+[[ -e $NVIDIA_OC_CONF ]] && old_nv_oc=$(< $NVIDIA_OC_CONF) || old_nv_oc=
+nvidia_oc=`echo "$response" | jq '.result.nvidia_oc' --raw-output`
+if [[ ! -z "$nvidia_oc" && "$nvidia_oc" != "null" ]]; then
+        [[ "$old_nv_oc" != "$nvidia_oc" ]] &&
+                echo "${CYAN}> Writing NVIDIA OC config${NOCOLOR}" &&
+                echo "$nvidia_oc" > $NVIDIA_OC_CONF
+elif [[ -f $NVIDIA_OC_CONF ]]; then
+        echo "${CYAN}> Deleting NVIDIA OC config${NOCOLOR}"
+        rm $NVIDIA_OC_CONF
+fi
+
+# AMD config
+[[ -e $AMD_OC_CONF ]] && old_amd_oc=$(< $AMD_OC_CONF) || old_amd_oc=
+amd_oc=`echo "$response" | jq '.result.amd_oc' --raw-output`
+if [[ ! -z "$amd_oc" && "$amd_oc" != "null" ]]; then
+        [[ "$old_amd_oc" != "$amd_oc" ]] &&
+                echo "${CYAN}> Writing AMD OC config${NOCOLOR}" &&
+                echo "$amd_oc" > $AMD_OC_CONF
+elif [[ -f $AMD_OC_CONF ]]; then
+        echo "${CYAN}> Deleting AMD OC config${NOCOLOR}"
+        rm $AMD_OC_CONF
+fi
+
+# Tweakers config
+[[ -e $TWEAKERS_CONF ]] && old_tweakers=$(< $TWEAKERS_CONF) || old_tweakers=
+tweakers=`echo "$response" | jq '.result.tweakers' --raw-output`
+if [[ ! -z "$tweakers" && "tweakers" != "null" ]]; then
+        [[ "$old_tweakers" != "$tweakers" ]] &&
+                echo "${CYAN}> Writing tweakers config${NOCOLOR}" &&
+                echo "$tweakers" > $TWEAKERS_CONF
+elif [[ -f $TWEAKERS_CONF ]]; then
+        echo "${CYAN}> Deleting tweakers config${NOCOLOR}"
+        rm $TWEAKERS_CONF
+fi
+
+# Autofan config
+[[ -e $AUTOFAN_CONF ]] && old_autofan=$(< $AUTOFAN_CONF) || old_autofan=
+autofan=`echo "$response" | jq '.result.autofan' --raw-output`
+if [[ ! -z "$autofan" && "$autofan" != "null" ]]; then
+        [[ "$old_autofan" != "$autofan" ]] &&
+                echo "${CYAN}> Writing Autofan config${NOCOLOR}" &&
+                echo "$autofan" > $AUTOFAN_CONF
+fi
+
+# Octofan config
+octofan=`echo "$response" | jq '.result.octofan' --raw-output`
+if [[ -n "$octofan" && "$octofan" != "null" ]]; then
+        if [[ -z $OCTOFAN_CONF ]]; then #reread env variables as after upgrade this can be empty
+                source /etc/environment
+                export `grep -vE '^$|^#' /etc/environment | cut -d= -f1` #export all variables from file
+        fi
+        echo "${CYAN}> Writing Octofan config${NOCOLOR}"
+        echo "$octofan" > $OCTOFAN_CONF
+        $OCTOFAN save_text_to_EEPROM
+fi
+
+# Coolbox Autofan config
+coolbox=`echo "$response" | jq '.result.coolbox' --raw-output`
+if [[ -n "$coolbox" && "$coolbox" != "null" ]]; then
+        # Coolbox remove check
+        coolbox_serial=
+        for (( i = 0; i < 3; i++ )); do #three times
+                coolbox_serial=`$COOLBOX --get_serial`
+                [[ -n $coolbox_serial ]] && break
+                sleep 0.5
+        done
+        if [[ -z $coolbox_serial ]]; then
+                coolbox_request=$(
+                        jq -n \
+                        --arg rig_id "$RIG_ID" \
+                        --arg passwd "$RIG_PASSWD" \
+                        '{
+                                "method": "coolbox", "jsonrpc": "2.0", "id": 0,
+                                "params": {
+                                        $rig_id, $passwd, "delete": true
+                                }
+                        }'
+                )
+                # print only in verbose mode
+                [[ $arg_verbose == 1 ]] && echo "$coolbox_request" | jq -c --arg pass "${RIG_PASSWD//?/*}" '.params.passwd=$pass'
+                coolbox_response=`echo "$coolbox_request" | curl $insecure -L --data @- --connect-timeout 7 --max-time 15 --silent \
+                        -XPOST "${HIVE_URL}?id_rig=$RIG_ID&method=coolbox" -H "Content-Type: application/json"`
+                if [[ $exitcode -eq 0 ]]; then
+                        [[ $arg_verbose == 1 ]] && echo "$coolbox_response"
+                        echo "${GREEN}Coolbox Autofan successfully removed${NOCOLOR}"
+                fi
+        else # coolbox found writing it's config
+                if [[ -z $COOLBOX_CONF ]]; then #reread env variables as after upgrade this can be empty
+                        source /etc/environment
+                        export `grep -vE '^$|^#' /etc/environment | cut -d= -f1` #export all variables from file
+                fi
+                echo "${CYAN}> Writing Coolbox Autofan config${NOCOLOR}"
+                echo "$coolbox" > $COOLBOX_CONF
+        fi
+fi
+
+# Ykeda Autofan config
+ykeda_autofan=`echo "$response" | jq '.result.ykeda_autofan' --raw-output`
+if [[ -n "$ykeda_autofan" && "$ykeda_autofan" != "null" ]]; then
+        if [[ -z $YKEDA_AUTOFAN_CONF ]]; then #reread env variables as after upgrade this can be empty
+                source /etc/environment
+                export `grep -vE '^$|^#' /etc/environment | cut -d= -f1` #export all variables from file
+        fi
+        echo "${CYAN}> Writing Ykeda Autofan config${NOCOLOR}"
+        echo "$ykeda_autofan" > $YKEDA_AUTOFAN_CONF
+fi
+
+# Windtank Autofan config
+windtank_autofan=`echo "$response" | jq '.result.windtank_autofan' --raw-output`
+if [[ -n "$windtank_autofan" && "$windtank_autofan" != "null" ]]; then
+   if [[ -z $WINDTANK_AUTOFAN_CONF ]]; then #reread env variables as after upgrade this can be empty
+      source /etc/environment
+      export `grep -vE '^$|^#' /etc/environment | cut -d= -f1` #export all variables from file
+   fi
+   echo "${CYAN}> Writing Windtank Autofan config${NOCOLOR}"
+   echo "$windtank_autofan" > $WINDTANK_AUTOFAN_CONF
+fi
+
+# Repository URLs
+HIVEREPO_LIST=/etc/apt/sources.list.d/hiverepo.list
+repository_list=`echo "$response" | jq '.result.repository_list' --raw-output`
+[[ -z "$repository_list" || "$repository_list" == "null" ]] &&
+        repository_list=$(< /hive/etc/hiverepo.list)
+# remove old symlink
+[[ -L $HIVEREPO_LIST ]] && rm $HIVEREPO_LIST
+
+existing_repository_list=
+[[ -e $HIVEREPO_LIST ]] && existing_repository_list=$(< $HIVEREPO_LIST)
+
+if [[ "$existing_repository_list" != "$repository_list" ]]; then
+        echo "${CYAN}> Writing repository URLs${NOCOLOR}"
+        echo "$repository_list" > $HIVEREPO_LIST
+fi
+
+# remove ref_id
+#[[ -e $REF_ID ]] && rm $REF_ID
+
+# update grub
+if [[ ! -z "$GRUB_CUSTOM" ]]; then
+        [[ -f /hive/etc/grub.custom ]] && grub="$(< /hive/etc/grub.custom)"
+        echo "$GRUB_CUSTOM" > /hive/etc/grub.custom
+        [[ "$grub" != "$(< /hive/etc/grub.custom)" ]] && selfupgrade --grub
+fi
+
+# Post actions
+if [[ $arg_boot == 0 ]]; then
+        [[ -e $INTEL_OC_CONF ]] && intel_oc=$(< $INTEL_OC_CONF) || intel_oc=
+        if [[ "$old_intel_oc" != "$intel_oc" ]]; then
+                echo "${CYAN}> Applying INTEL OC${NOCOLOR}"
+                intel-oc
+        fi
+
+        [[ -e $AMD_OC_CONF ]] && amd_oc=$(< $AMD_OC_CONF) || amd_oc=
+        if [[ "$old_amd_oc" != "$amd_oc" ]]; then
+                echo "${CYAN}> Applying AMD OC${NOCOLOR}"
+                amd-oc
+        fi
+
+        [[ -e $NVIDIA_OC_CONF ]] && nv_oc=$(< $NVIDIA_OC_CONF) || nv_oc=
+        if [[ "$old_nv_oc" != "$nv_oc" ]]; then
+                echo "${CYAN}> Applying NVIDIA OC${NOCOLOR}"
+                nvidia-oc
+        fi
+
+        [[ -e $TWEAKERS_CONF ]] && tweakers=$(< $TWEAKERS_CONF) || tweakers=
+        if [[ "$old_tweakers" != "$tweakers" ]]; then
+                echo "${CYAN}> Applying Tweakers${NOCOLOR}"
+                tweakers
+        fi
+
+        [[ -e $WALLET_CONF ]] && wallet=$(< $WALLET_CONF) || wallet=
+        [[ "$old_wallet" != "$wallet" && $arg_nostart == 0 ]] && miner restart
+else
+        if [[ $gpu_count_amd -gt 0 && $ubuntu_ver -lt 2004 ]]; then
+                [[ -e /hive/etc/gpu.ids ]] && source /hive/etc/gpu.ids
+                [[ -n $GPU_NAVI30 && $(lspci -nd 1002::0300 | grep -Ei $GPU_NAVI30 | wc -l) -gt 0 ]] && echo "AMD RDNA3 GPUs require an Image based on Ubuntu 20.04 or newer" | message warn "Unsupported device detected" payload
+        fi
+
+        if [[ $gpu_count_intel -gt 0 && -z $intel_ocl_version ]]; then
+                if [[ $ubuntu_ver -gt 1804 ]]; then
+                        echo "${CYAN}> Found $gpu_count_intel Intel dGPU. Install libs...${NOCOLOR}"
+                        apt -y update > /dev/null 2>&1
+                        apt install -y intel-opencl-icd > /dev/null 2>&1
+                else
+                        echo "Intel Alchemist GPUs require an Image based on Ubuntu 20.04 or newer" | message warn "Unsupported device detected" payload
+                fi
+        fi
+fi
+
+#echo "${CYAN}> Touching $HELLO_OK${NOCOLOR}"
+touch $HELLO_OK
+
+# Flush buffers if any files changed
+sync
+
+if [[ -n $ykeda_modelname ]]; then
+        echo "${CYAN}> Starting myfan autofan${NOCOLOR}"
+        screen -ls myfan > /dev/null && (echo "${BGREEN}myfan autofan already started${NOCOLOR}") || (echo "${BGREEN}OK${NOCOLOR}"; screen -dmS myfan /home/user/myfan.sh)
+fi
+
+exit 0
