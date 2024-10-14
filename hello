@@ -270,7 +270,7 @@ fi
 
 # ykeda Autofan
 ykeda_modelname=
-[[ `lsusb 2> /dev/null | grep -E "(LGT8F328P|CH340|CP210x|USB TO UART BRIDGE)" | wc -l` -eq "1" ]] && ykeda_modelname=myfan
+[[ `lsusb 2> /dev/null | grep -E "(LGT8F328P|CH340|HL-340|CP210x|USB TO UART BRIDGE)" | wc -l` -eq "1" ]] && ykeda_modelname=myfan
 
 if [[ `lsusb -v -d 10c4:ea60 2>/dev/null | grep iSerial | awk '{print $3}'` == 'ykeda_autofan' ]]; then
         ykeda_modelname=`lsusb -v -d 10c4:ea60 2>/dev/null | grep iProduct | awk '{print $3}'`
