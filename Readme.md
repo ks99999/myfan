@@ -47,4 +47,4 @@ curl https://raw.githubusercontent.com/ks99999/myfan/main/myfan-setup.sh | bash
 
 У автора myfan подключен к Fan hub одним пином PWM. Этого достаточно для управления до 10 кулеров.
 
-Для предложений и багов просьба писать автору на a@korshunov.me,  telegram @Alexandr_admin
+Для предложений и багов просьба писать автору на a@korshunov.me,  telegram @Alexandr_ib
