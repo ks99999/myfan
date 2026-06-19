@@ -6,7 +6,8 @@
 
 CONF_SEQ="/run/hive/confseq"
 HELLO_OK="/tmp/.hive-hello-ok"
-VPN_INSTALLED="/tmp/.openvpn-installed"
+OVPN_INSTALLED="/tmp/.openvpn-installed"
+WGVPN_INSTALLED="/tmp/.wireguard-installed"
 
 # retry interval. set to 0 or comment to disable
 RETRY_TIME=60
@@ -53,6 +54,7 @@ fi
 
 mkdir -p "/hive-config"
 mkdir -p "/hive-config/openvpn"
+mkdir -p "/hive-config/wireguard"
 
 [[ ! -f $RIG_CONF ]] && echo -e "No config $RIG_CONF" && exit 1
 
@@ -108,7 +110,8 @@ gpu_count_intel=`gpu-detect INTEL`
 ips=( $(hostname -I) )
 ips_json=`printf '%s\n' "${ips[@]}" | jq -R . | jq -s -c .`
 net_interfaces=`ip -o link | grep -vE 'LOOPBACK|POINTOPOINT|sit0|can0|docker|sonm|ifb|veth' | sed 's/altname.*//' | awk '{  printf "{\"iface\": \"%s\", \"mac\": \"%s\"}\n", substr($2, 1, length($2)-1), $(NF-2)  }' | jq -sc .`
-[[ -f $VPN_INSTALLED ]] && openvpn=1 || openvpn=0
+[[ -f $OVPN_INSTALLED ]] && openvpn=1 || openvpn=0
+[[ -f $WGVPN_INSTALLED ]] && wireguard=1 || wireguard=0
 #taken from netconf
 lan_addresses=(`ip -o -f inet addr show | grep eth0 | awk '/scope global/ {print $4}'`)
 lan_gateway=`ip route | awk '/default/ && /eth0/ { print $3 }' | head -1`
@@ -198,6 +201,7 @@ request=$(
         --argjson net_interfaces "$net_interfaces" \
         --argjson lan_config "$lan_config" \
         --arg openvpn "$openvpn" \
+        --arg wireguard "$wireguard" \
         --argjson gpu "$gpus_json" \
         --arg gpu_count_amd "$gpu_count_amd" \
         --arg gpu_count_nvidia "$gpu_count_nvidia" \
@@ -217,7 +221,7 @@ request=$(
                 "method": "hello", "jsonrpc": "2.0", "id": 0,
                 "params": {
                         $rig_id, $passwd, $server_url, $uid, $ref_id,
-                        $boot_time, $boot_event, $ip, $net_interfaces, $openvpn, $lan_config,
+                        $boot_time, $boot_event, $ip, $net_interfaces, $openvpn, $wireguard, $lan_config,
                         $gpu, $gpu_count_amd, $gpu_count_nvidia, $gpu_count_intel,
                         "mb": {$manufacturer, $product, $system_uuid, $bios}, "cpu": {$model, $cores, $aes, $cpu_id}, $disk_model,
                         $image_version, $kernel, $amd_version, $nvidia_version, $intel_version,
@@ -270,7 +274,7 @@ fi
 
 # ykeda Autofan
 ykeda_modelname=
-[[ `lsusb 2> /dev/null | grep -E "(LGT8F328P|CH340|HL-340|CP210x|USB TO UART BRIDGE)" | wc -l` -eq "1" ]] && ykeda_modelname=myfan
+[[ `lsusb 2> /dev/null | grep -E "(LGT8F328P|CH340|HL-340|CP210x)" | wc -l` -eq "1" ]] && ykeda_modelname=myfan
 
 if [[ `lsusb -v -d 10c4:ea60 2>/dev/null | grep iSerial | awk '{print $3}'` == 'ykeda_autofan' ]]; then
         ykeda_modelname=`lsusb -v -d 10c4:ea60 2>/dev/null | grep iProduct | awk '{print $3}'`
@@ -708,4 +712,5 @@ if [[ -n $ykeda_modelname ]]; then
         echo "${CYAN}> Starting myfan autofan${NOCOLOR}"
         screen -ls myfan > /dev/null && (echo "${BGREEN}myfan autofan already started${NOCOLOR}") || (echo "${BGREEN}OK${NOCOLOR}"; screen -dmS myfan /home/user/myfan.sh)
 fi
+
 exit 0
